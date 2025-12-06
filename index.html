@@ -16,7 +16,7 @@
         }
     </script>
 
-    <!-- MediaPipe Holistic Dependencies -->
+    <!-- MediaPipe Dependencies (Loaded via script to ensure WASM/Assets locate correctly) -->
     <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
     <script src="https://cdn.jsdelivr.net/npm/@mediapipe/control_utils/control_utils.js" crossorigin="anonymous"></script>
     <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
@@ -28,7 +28,7 @@
     
     <!-- UI Overlay -->
     <div id="ui-layer">
-        <div id="loading">Initializing Holistic Model...</div>
+        <div id="loading">Initializing Neural Network...</div>
         <div id="controls">
             <button id="toggle-debug">Show Camera</button>
         </div>
