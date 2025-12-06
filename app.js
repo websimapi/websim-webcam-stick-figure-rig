@@ -180,7 +180,7 @@ class StickFigure {
             // So RadiusTop = r2 (End Radius). RadiusBottom = r1 (Start Radius).
             
             const geo = new THREE.CylinderGeometry(def.r2, def.r1, 1, 12);
-            geo.rotateX(-Math.PI / 2); // Rotate so +Y becomes +Z (Forward)
+            geo.rotateX(Math.PI / 2); // Rotate so +Y becomes +Z (Forward)
 
             const mesh = new THREE.Mesh(geo, this.boneMaterial);
             mesh.castShadow = true;
@@ -201,87 +201,7 @@ class StickFigure {
     update(worldLandmarks, normalizedLandmarks) {
         const scale = 1.0; 
 
-        if(worldLandmarks) {
-            // Update Joints
-            for (let i = 0; i < worldLandmarks.length; i++) {
-                const lm = worldLandmarks[i];
-                if (this.joints[i]) {
-                    this.joints[i].position.set(-lm.x * scale, -lm.y * scale, -lm.z * scale);
-                    this.joints[i].visible = lm.visibility > 0.5;
-                    
-                    // Dynamic scaling for joints based on location? 
-                    // Optional: Make hips/shoulder joints bigger
-                    if ([11,12,23,24].includes(i)) this.joints[i].scale.setScalar(0.07);
-                    else if ([13,14,25,26].includes(i)) this.joints[i].scale.setScalar(0.06);
-                    else this.joints[i].scale.setScalar(0.04);
-                }
-            }
-        }
-
-        // Update Bones
-        this.bones.forEach(bone => {
-            const j1 = this.joints[bone.start];
-            const j2 = this.joints[bone.end];
-
-            if (j1.visible && j2.visible) {
-                bone.mesh.visible = true;
-                const p1 = j1.position;
-                const p2 = j2.position;
-                const dist = p1.distanceTo(p2);
-
-                if (dist > 0.001) {
-                    // Position at midpoint
-                    bone.mesh.position.copy(p1).add(p2).multiplyScalar(0.5);
-                    
-                    // Scale length only
-                    bone.mesh.scale.set(1, 1, dist);
-                    
-                    // Orient
-                    bone.mesh.lookAt(p2);
-                }
-            } else {
-                bone.mesh.visible = false;
-            }
-        });
-
-        // Update Head
-        // Use nose (0) and ears (7,8) to determine rotation if possible, or just look at camera
-        const nose = this.joints[0];
-        const leftEar = this.joints[7];
-        const rightEar = this.joints[8];
-
-        if (nose && nose.visible) {
-            this.headGroup.visible = true;
-            this.headGroup.position.copy(nose.position);
-            
-            // Simple rotation logic: Look at camera but keep upright? 
-            // Or try to follow head rotation from ears?
-            // Calculating Head Rotation from Ears + Nose is better
-            if (leftEar.visible && rightEar.visible) {
-                // Vector from Left Ear to Right Ear = Local X
-                const earDir = new THREE.Vector3().subVectors(rightEar.position, leftEar.position).normalize();
-                // Vector from Ears Midpoint to Nose = Local Z (Forward)
-                const earMid = new THREE.Vector3().addVectors(leftEar.position, rightEar.position).multiplyScalar(0.5);
-                const faceDir = new THREE.Vector3().subVectors(nose.position, earMid).normalize();
-                // Up vector
-                const upDir = new THREE.Vector3().crossVectors(earDir, faceDir).normalize();
-                
-                // Construct rotation matrix
-                const m = new THREE.Matrix4();
-                m.makeBasis(earDir, upDir.negate(), faceDir); // Y is usually Up. Here, ears to nose is roughly -Y? No, EarMid->Nose is +Z in face coordinates. 
-                // Let's just use lookAt camera for stability if tracking is jittery, 
-                // but user asked for "detailed". Let's try simple LookAt Camera first for reliability.
-                
-                this.headGroup.lookAt(camera.position); 
-            } else {
-                this.headGroup.lookAt(camera.position);
-            }
-            
-        } else {
-            this.headGroup.visible = false;
-        }
-
-        // --- Full Body Offset (Depth/Movement) ---
+        // 1. Update Root Position FIRST to ensure world matrices are valid for lookAt
         if (normalizedLandmarks) {
             const leftShoulder = normalizedLandmarks[11];
             const rightShoulder = normalizedLandmarks[12];
@@ -304,10 +224,75 @@ class StickFigure {
                 this.root.position.x += (targetX - this.root.position.x) * 0.1;
                 this.root.position.z += (targetZ - this.root.position.z) * 0.1;
                 
-                // Floor clamping: find lowest joint y and offset root so it touches 0
-                // Simple version: Fixed height
                 this.root.position.y = 1.0;
+
+                // Force update matrix so children calculations use current frame's transform
+                this.root.updateMatrixWorld();
             }
+        }
+
+        if(worldLandmarks) {
+            // 2. Update Joints
+            for (let i = 0; i < worldLandmarks.length; i++) {
+                const lm = worldLandmarks[i];
+                if (this.joints[i]) {
+                    this.joints[i].position.set(-lm.x * scale, -lm.y * scale, -lm.z * scale);
+                    this.joints[i].visible = lm.visibility > 0.5;
+                    
+                    // Dynamic scaling for joints
+                    if ([11,12,23,24].includes(i)) this.joints[i].scale.setScalar(0.07);
+                    else if ([13,14,25,26].includes(i)) this.joints[i].scale.setScalar(0.06);
+                    else this.joints[i].scale.setScalar(0.04);
+                }
+            }
+        }
+
+        // 3. Update Bones
+        const target = new THREE.Vector3();
+        this.bones.forEach(bone => {
+            const j1 = this.joints[bone.start];
+            const j2 = this.joints[bone.end];
+
+            if (j1.visible && j2.visible) {
+                bone.mesh.visible = true;
+                const p1 = j1.position;
+                const p2 = j2.position;
+                const dist = p1.distanceTo(p2);
+
+                if (dist > 0.001) {
+                    // Position at midpoint (Local)
+                    bone.mesh.position.copy(p1).add(p2).multiplyScalar(0.5);
+                    
+                    // Scale length only
+                    bone.mesh.scale.set(1, 1, dist);
+                    
+                    // Orient: lookAt requires World Space target. 
+                    // Since p2 is local to root, we must convert it to world space.
+                    target.copy(p2).applyMatrix4(this.root.matrixWorld);
+                    bone.mesh.lookAt(target);
+                }
+            } else {
+                bone.mesh.visible = false;
+            }
+        });
+
+        // 4. Update Head
+        const nose = this.joints[0];
+        const leftEar = this.joints[7];
+        const rightEar = this.joints[8];
+
+        if (nose && nose.visible) {
+            this.headGroup.visible = true;
+            this.headGroup.position.copy(nose.position);
+            
+            if (leftEar.visible && rightEar.visible) {
+                this.headGroup.lookAt(camera.position); 
+            } else {
+                this.headGroup.lookAt(camera.position);
+            }
+            
+        } else {
+            this.headGroup.visible = false;
         }
     }
 }
