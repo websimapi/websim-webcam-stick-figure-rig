@@ -347,111 +347,100 @@ class StickFigure {
     }
 
     updateHandInstance(handGroup, handLandmarks, bodyLandmarks, wristIdx, indexIdx, pinkyIdx, isLeft) {
-        if (!handLandmarks || !bodyLandmarks[wristIdx] || bodyLandmarks[wristIdx].visibility < 0.5) {
+        // 1. Safety & Visibility Checks
+        const wrist = bodyLandmarks[wristIdx];
+        const index = bodyLandmarks[indexIdx];
+        const pinky = bodyLandmarks[pinkyIdx];
+        
+        if (!handLandmarks || !wrist || wrist.visibility < 0.5 || !index || !pinky) {
             handGroup.visible = false;
             return;
         }
-
         handGroup.visible = true;
 
-        // 1. Position: Attach to Wrist
-        // Note: Body landmarks are already inverted (-x, -y, -z) in update(), so we match that transform here
-        const wristPos = new THREE.Vector3(
-            -bodyLandmarks[wristIdx].x,
-            -bodyLandmarks[wristIdx].y,
-            -bodyLandmarks[wristIdx].z
-        );
+        // 2. Define World Reference Frame (from Body Pose)
+        // We use the Body World Landmarks to position and orient the entire hand group.
+        // This ensures the hand stays attached to the arm properly.
+        const pWrist = new THREE.Vector3(-wrist.x, -wrist.y, -wrist.z);
+        const pIndex = new THREE.Vector3(-index.x, -index.y, -index.z);
+        const pPinky = new THREE.Vector3(-pinky.x, -pinky.y, -pinky.z);
 
-        // We need to operate in local space of the stick figure root
-        // Since handGroup is child of root, and we set position relative to root
-        handGroup.position.copy(wristPos);
+        // Calculate Body-derived Basis vectors
+        // Main Axis: Wrist -> Index
+        const vBodyDir = new THREE.Vector3().subVectors(pIndex, pWrist);
+        const bodyScale = vBodyDir.length();
+        vBodyDir.normalize();
 
-        // 2. Orientation & Scale Logic
-        // We use the body landmarks (Wrist, IndexKnuckle, PinkyKnuckle) to determine the world rotation
-        // because handLandmarks are normalized and lack absolute world rotation.
+        // Secondary Axis: Wrist -> Pinky (defines the plane of the hand)
+        const vBodySide = new THREE.Vector3().subVectors(pPinky, pWrist).normalize();
         
-        const indexPos = new THREE.Vector3(
-            -bodyLandmarks[indexIdx].x,
-            -bodyLandmarks[indexIdx].y,
-            -bodyLandmarks[indexIdx].z
-        );
+        // Construct Orthogonal Basis: Forward (Dir), Up (Normal to Palm), Side
+        const vBodyUp = new THREE.Vector3().crossVectors(vBodyDir, vBodySide).normalize();
+        const vBodySideOrtho = new THREE.Vector3().crossVectors(vBodyUp, vBodyDir).normalize();
         
-        const pinkyPos = new THREE.Vector3(
-            -bodyLandmarks[pinkyIdx].x,
-            -bodyLandmarks[pinkyIdx].y,
-            -bodyLandmarks[pinkyIdx].z
-        );
+        const mBody = new THREE.Matrix4().makeBasis(vBodyDir, vBodyUp, vBodySideOrtho);
+        const qBody = new THREE.Quaternion().setFromRotationMatrix(mBody);
 
-        // Calculate Scale: Match 3D distance of Wrist->Index
-        const worldScale = wristPos.distanceTo(indexPos);
-        // Distance in normalized hand landmarks (Wrist=0 to IndexMCP=5)
+        // 3. Apply Transform to Hand Group
+        handGroup.position.copy(pWrist);
+        handGroup.quaternion.copy(qBody);
+        
+        // 4. Map Normalized Hand Landmarks to Local Group Space
+        // Hand Landmarks are relative to the crop, not world. We need to normalize them.
         const lmWrist = handLandmarks[0];
         const lmIndex = handLandmarks[5];
         const lmPinky = handLandmarks[17];
 
-        const dHand = Math.sqrt(
-            Math.pow(lmIndex.x - lmWrist.x, 2) +
-            Math.pow(lmIndex.y - lmWrist.y, 2) +
-            Math.pow(lmIndex.z - lmWrist.z, 2)
-        );
+        // Calculate Hand LM Basis
+        const vLmDir = new THREE.Vector3(lmIndex.x - lmWrist.x, lmIndex.y - lmWrist.y, lmIndex.z - lmWrist.z);
+        const distLm = vLmDir.length(); // Scale reference
+        vLmDir.normalize();
+
+        const vLmSide = new THREE.Vector3(lmPinky.x - lmWrist.x, lmPinky.y - lmWrist.y, lmPinky.z - lmWrist.z).normalize();
+        const vLmUp = new THREE.Vector3().crossVectors(vLmDir, vLmSide).normalize();
+        const vLmSideOrtho = new THREE.Vector3().crossVectors(vLmUp, vLmDir).normalize();
         
-        const scale = (worldScale / (dHand + 1e-5)) * 1.0; // Multiplier to tune size if needed
+        const mLm = new THREE.Matrix4().makeBasis(vLmDir, vLmUp, vLmSideOrtho);
+        const qLm = new THREE.Quaternion().setFromRotationMatrix(mLm);
+
+        // Calculate Scale Factor (Body Size / LM Size)
+        const scale = bodyScale / (distLm || 0.001); // Prevent div/0
         handGroup.scale.setScalar(scale);
 
-        // Calculate Rotation
-        // Construct Basis from Pose World Landmarks
-        const vPoseFwd = new THREE.Vector3().subVectors(indexPos, wristPos).normalize();
-        const vPoseSide = new THREE.Vector3().subVectors(pinkyPos, wristPos).normalize();
-        const vPoseUp = new THREE.Vector3().crossVectors(vPoseFwd, vPoseSide).normalize();
-        const vPoseSideCorrected = new THREE.Vector3().crossVectors(vPoseUp, vPoseFwd).normalize();
-        const mPose = new THREE.Matrix4().makeBasis(vPoseFwd, vPoseUp, vPoseSideCorrected);
+        // Correction Rotation: We need to rotate LM vectors so that LM-Forward aligns with Group-Forward (X-axis)
+        const qCorrection = qLm.clone().invert();
 
-        // Construct Basis from Hand Landmarks (Local)
-        // Hand system: x=horizontal, y=vertical, z=depth. 
-        // We need vectors corresponding to the same physical axes.
-        const vHandFwd = new THREE.Vector3(lmIndex.x - lmWrist.x, lmIndex.y - lmWrist.y, lmIndex.z - lmWrist.z).normalize();
-        const vHandSide = new THREE.Vector3(lmPinky.x - lmWrist.x, lmPinky.y - lmWrist.y, lmPinky.z - lmWrist.z).normalize();
-        const vHandUp = new THREE.Vector3().crossVectors(vHandFwd, vHandSide).normalize();
-        const vHandSideCorrected = new THREE.Vector3().crossVectors(vHandUp, vHandFwd).normalize();
-        const mHand = new THREE.Matrix4().makeBasis(vHandFwd, vHandUp, vHandSideCorrected);
-        
-        // Rotation R = mPose * inverse(mHand)
-        const mRot = mPose.multiply(mHand.invert());
-        handGroup.quaternion.setFromRotationMatrix(mRot);
-        
-        // Apply mirror for one hand if needed? 
-        // MediaPipe coords are usually consistent, but let's see. 
-        // Actually, just mapping the positions locally works because we computed the rotation to align the basis.
-
-        // 3. Update Joint Positions (Relative to Wrist)
+        // 5. Update Internal Joints
         handGroup.userData.joints.forEach((mesh, i) => {
             const lm = handLandmarks[i];
-            // Position relative to wrist (index 0)
-            // Note: We don't invert axes here because we built the rotation matrix mHand from these axes directly.
-            // We just place them as is relative to 0.
-            mesh.position.set(
-                (lm.x - lmWrist.x), 
-                (lm.y - lmWrist.y), 
-                (lm.z - lmWrist.z)
-            );
+            
+            // Vector from Wrist (in LM space)
+            const vRaw = new THREE.Vector3(lm.x - lmWrist.x, lm.y - lmWrist.y, lm.z - lmWrist.z);
+            
+            // Rotate to align with Group Axes (X=Forward)
+            vRaw.applyQuaternion(qCorrection);
+            
+            // Set Position (Scale is handled by parent group)
+            mesh.position.copy(vRaw);
         });
 
-        // 4. Update Bones
+        // 6. Update Internal Bones
         handGroup.userData.bones.forEach(bone => {
-            const p1 = handGroup.userData.joints[bone.start].position;
-            const p2 = handGroup.userData.joints[bone.end].position;
-            
-            bone.mesh.position.copy(p1).add(p2).multiplyScalar(0.5);
-            const dist = p1.distanceTo(p2);
-            bone.mesh.scale.set(1, 1, dist);
-            bone.mesh.lookAt(p2); // lookAt works in local space if parent is transformed? No.
-            // Mesh lookAt operates in world space usually, BUT if we are adding to a group, 
-            // and we want it to look at a local point...
-            // ThreeJS Object3D.lookAt() assumes the target is in WORLD space.
-            // Since p2 is local, we must convert p2 to world for lookAt to work correctly.
-            
-            const worldTarget = p2.clone().applyMatrix4(handGroup.matrixWorld);
-            bone.mesh.lookAt(worldTarget);
+             const j1 = handGroup.userData.joints[bone.start];
+             const j2 = handGroup.userData.joints[bone.end];
+             
+             // Midpoint
+             bone.mesh.position.copy(j1.position).add(j2.position).multiplyScalar(0.5);
+             
+             // Scale Length
+             const vBone = new THREE.Vector3().subVectors(j2.position, j1.position);
+             const len = vBone.length();
+             bone.mesh.scale.set(1, 1, len);
+             
+             // Orientation
+             // Align cylinder (local Y) or customized Z to vector
+             // Our bone geometry is rotated to Z-axis in init, so we align (0,0,1) to vBone
+             bone.mesh.quaternion.setFromUnitVectors(new THREE.Vector3(0,0,1), vBone.normalize());
         });
     }
 }
