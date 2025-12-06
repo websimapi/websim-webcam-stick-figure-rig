@@ -55,10 +55,6 @@ scene.add(dirLight);
 const gridHelper = new THREE.GridHelper(20, 20, 0x444444, 0x222222);
 scene.add(gridHelper);
 
-// Texture Loader
-const textureLoader = new THREE.TextureLoader();
-const faceTexture = textureLoader.load('./face.png');
-
 // --- Stick Figure Class ---
 class StickFigure {
     constructor(scene) {
@@ -68,167 +64,249 @@ class StickFigure {
         this.root = new THREE.Group();
         this.scene.add(this.root);
 
-        this.material = new THREE.MeshStandardMaterial({ 
-            color: CONFIG.stickFigure.color,
-            roughness: 0.4,
-            metalness: 0.3
+        // --- Materials ---
+        this.jointMaterial = new THREE.MeshStandardMaterial({ 
+            color: 0x333333,
+            roughness: 0.3,
+            metalness: 0.8,
+            emissive: 0x111111,
         });
 
-        this.boneMaterial = new THREE.MeshStandardMaterial({
+        this.boneMaterial = new THREE.MeshPhysicalMaterial({
             color: 0xffffff,
-            roughness: 0.5
+            roughness: 0.2,
+            metalness: 0.1,
+            clearcoat: 1.0,
+            clearcoatRoughness: 0.1
+        });
+        
+        this.headMaterial = new THREE.MeshPhysicalMaterial({
+            color: 0xeeeeee,
+            roughness: 0.2,
+            metalness: 0.1,
+            clearcoat: 0.8
         });
 
-        // Initialize pool of meshes
+        this.eyeMaterial = new THREE.MeshStandardMaterial({
+            color: 0x000000,
+            roughness: 0.0,
+            metalness: 0.5
+        });
+
         this.initGeometry();
     }
 
     initGeometry() {
-        // We need 33 joints roughly, mostly hidden, but let's make visible ones
-        // MediaPipe Pose has 33 landmarks.
-        const sphereGeo = new THREE.SphereGeometry(CONFIG.stickFigure.jointSize, 16, 16);
-
-        // Create joints
+        // 1. Create Joints (Spheres)
+        const sphereGeo = new THREE.SphereGeometry(1, 16, 16); // Base size 1, will scale
+        
+        // Create 33 landmarks
         for (let i = 0; i < 33; i++) {
-            const mesh = new THREE.Mesh(sphereGeo, this.material);
-            mesh.visible = false; // Start hidden
+            const mesh = new THREE.Mesh(sphereGeo, this.jointMaterial);
+            mesh.scale.setScalar(0.04); // Default size
+            mesh.visible = false;
             this.root.add(mesh);
             this.joints[i] = mesh;
         }
 
-        // Special Head
-        this.head = new THREE.Mesh(
-            new THREE.PlaneGeometry(CONFIG.stickFigure.headSize * 2.5, CONFIG.stickFigure.headSize * 2.5),
-            new THREE.MeshBasicMaterial({ 
-                map: faceTexture, 
-                transparent: true, 
-                side: THREE.DoubleSide 
-            })
+        // 2. Head Construction (Procedural Mesh)
+        this.headGroup = new THREE.Group();
+        this.root.add(this.headGroup);
+        
+        // Head Shape (Capsule-like using Sphere + Scale)
+        const headMesh = new THREE.Mesh(
+            new THREE.CapsuleGeometry(0.1, 0.15, 4, 8),
+            this.headMaterial
         );
-        this.root.add(this.head);
+        this.headGroup.add(headMesh);
+        
+        // Eyes
+        const eyeGeo = new THREE.SphereGeometry(0.025, 12, 12);
+        const leftEye = new THREE.Mesh(eyeGeo, this.eyeMaterial);
+        leftEye.position.set(-0.04, 0.02, 0.08); // Offset from head center
+        const rightEye = new THREE.Mesh(eyeGeo, this.eyeMaterial);
+        rightEye.position.set(0.04, 0.02, 0.08);
+        
+        this.headGroup.add(leftEye);
+        this.headGroup.add(rightEye);
+        
+        this.headGroup.visible = false;
 
-        // Connections (Bones)
-        // Indices based on MediaPipe Pose connections
-        this.connections = [
-            [11, 12], // Shoulders
-            [11, 13], [13, 15], // Left Arm
-            [12, 14], [14, 16], // Right Arm
-            [11, 23], [12, 24], // Torso sides
-            [23, 24], // Hips
-            [23, 25], [25, 27], // Left Leg
-            [24, 26], [26, 28], // Right Leg
-            [27, 29], [27, 31], // Left Foot (Heel, Toe)
-            [28, 30], [28, 32], // Right Foot
-            [15, 17], [15, 19], [15, 21], // Left Hand
-            [16, 18], [16, 20], [16, 22]  // Right Hand
+        // 3. Define Body Segments with Specific Geometry
+        // Format: [start, end, radiusTop, radiusBottom, type]
+        const boneDefs = [
+            // Torso (Thicker)
+            { start: 11, end: 12, r1: 0.06, r2: 0.06 }, // Shoulders
+            { start: 23, end: 24, r1: 0.07, r2: 0.07 }, // Hips
+            { start: 11, end: 23, r1: 0.05, r2: 0.06 }, // L Side
+            { start: 12, end: 24, r1: 0.05, r2: 0.06 }, // R Side
+            
+            // Arms (Tapered)
+            { start: 11, end: 13, r1: 0.05, r2: 0.04 }, // L Upper Arm
+            { start: 13, end: 15, r1: 0.035, r2: 0.03 }, // L Lower Arm
+            { start: 12, end: 14, r1: 0.05, r2: 0.04 }, // R Upper Arm
+            { start: 14, end: 16, r1: 0.035, r2: 0.03 }, // R Lower Arm
+            
+            // Legs (Thicker Tapered)
+            { start: 23, end: 25, r1: 0.07, r2: 0.055 }, // L Thigh
+            { start: 25, end: 27, r1: 0.05, r2: 0.04 }, // L Shin
+            { start: 24, end: 26, r1: 0.07, r2: 0.055 }, // R Thigh
+            { start: 26, end: 28, r1: 0.05, r2: 0.04 }, // R Shin
+
+            // Hands/Feet (Simple connections)
+            { start: 15, end: 17, r1: 0.02, r2: 0.02 }, // L Pinky Base
+            { start: 15, end: 19, r1: 0.02, r2: 0.02 }, // L Index Base
+            { start: 16, end: 18, r1: 0.02, r2: 0.02 }, // R Pinky Base
+            { start: 16, end: 20, r1: 0.02, r2: 0.02 }, // R Index Base
+            
+            { start: 27, end: 29, r1: 0.03, r2: 0.03 }, // L Heel
+            { start: 27, end: 31, r1: 0.03, r2: 0.03 }, // L Toe
+            { start: 28, end: 30, r1: 0.03, r2: 0.03 }, // R Heel
+            { start: 28, end: 32, r1: 0.03, r2: 0.03 }, // R Toe
         ];
 
-        const cylinderGeo = new THREE.CylinderGeometry(CONFIG.stickFigure.boneThickness, CONFIG.stickFigure.boneThickness, 1, 8);
-        cylinderGeo.rotateX(Math.PI / 2); // Orient along Z initially for lookAt logic or just use vector math
+        this.bones = [];
 
-        this.boneMeshes = [];
-        this.connections.forEach((pair) => {
-            const mesh = new THREE.Mesh(cylinderGeo, this.boneMaterial);
+        boneDefs.forEach(def => {
+            // Create Cylinder: radiusTop, radiusBottom, height=1, segments=8
+            // We rotate X 90 degrees so cylinder aligns with Z axis. 
+            // Default Cylinder is Y-up. Top is +Y. Bottom is -Y.
+            // Rotated X 90: Top becomes +Z, Bottom becomes -Z.
+            // So r1 (start) should be Bottom (-Z), r2 (end) should be Top (+Z).
+            // Actually, wait: 
+            // If I put mesh at midpoint and LookAt(end). 
+            // Local +Z points to End.
+            // So the face that is at +Z (the "Top" of the original cylinder) should be r2.
+            // So RadiusTop = r2 (End Radius). RadiusBottom = r1 (Start Radius).
+            
+            const geo = new THREE.CylinderGeometry(def.r2, def.r1, 1, 12);
+            geo.rotateX(-Math.PI / 2); // Rotate so +Y becomes +Z (Forward)
+
+            const mesh = new THREE.Mesh(geo, this.boneMaterial);
+            mesh.castShadow = true;
+            mesh.receiveShadow = true;
             mesh.visible = false;
+            
             this.root.add(mesh);
-            this.boneMeshes.push({ mesh, start: pair[0], end: pair[1] });
+            this.bones.push({ 
+                mesh, 
+                start: def.start, 
+                end: def.end,
+                r1: def.r1,
+                r2: def.r2
+            });
         });
     }
 
     update(worldLandmarks, normalizedLandmarks) {
-        // 1. Position Joints
-        // MediaPipe World coordinates: Y is down? No, usually Y is up in WorldLandmarks but inverted in raw. 
-        // Let's check: +Y in MP World is usually down. +Z is usually 'into' the scene?
-        // We might need to invert Y and Z to match Three.js (Y up, -Z forward)
-
-        // Scaling factor to make the figure reasonable size in the scene
         const scale = 1.0; 
 
-        // Update joint positions
         if(worldLandmarks) {
+            // Update Joints
             for (let i = 0; i < worldLandmarks.length; i++) {
                 const lm = worldLandmarks[i];
                 if (this.joints[i]) {
-                    // Mapping MP coordinates to Three.js
-                    // MP: x (left/right), y (up/down), z (depth)
-                    // We flip Y to match standard 3D world up
                     this.joints[i].position.set(-lm.x * scale, -lm.y * scale, -lm.z * scale);
                     this.joints[i].visible = lm.visibility > 0.5;
+                    
+                    // Dynamic scaling for joints based on location? 
+                    // Optional: Make hips/shoulder joints bigger
+                    if ([11,12,23,24].includes(i)) this.joints[i].scale.setScalar(0.07);
+                    else if ([13,14,25,26].includes(i)) this.joints[i].scale.setScalar(0.06);
+                    else this.joints[i].scale.setScalar(0.04);
                 }
             }
         }
 
         // Update Bones
-        this.boneMeshes.forEach(bone => {
-            const startJoint = this.joints[bone.start];
-            const endJoint = this.joints[bone.end];
+        this.bones.forEach(bone => {
+            const j1 = this.joints[bone.start];
+            const j2 = this.joints[bone.end];
 
-            if (startJoint.visible && endJoint.visible) {
+            if (j1.visible && j2.visible) {
                 bone.mesh.visible = true;
-                const p1 = startJoint.position;
-                const p2 = endJoint.position;
-
-                // Position at midpoint
-                bone.mesh.position.copy(p1).add(p2).multiplyScalar(0.5);
-
-                // Scale length
+                const p1 = j1.position;
+                const p2 = j2.position;
                 const dist = p1.distanceTo(p2);
-                bone.mesh.scale.set(1, 1, dist);
 
-                // Orientation
-                bone.mesh.lookAt(p2);
+                if (dist > 0.001) {
+                    // Position at midpoint
+                    bone.mesh.position.copy(p1).add(p2).multiplyScalar(0.5);
+                    
+                    // Scale length only
+                    bone.mesh.scale.set(1, 1, dist);
+                    
+                    // Orient
+                    bone.mesh.lookAt(p2);
+                }
             } else {
                 bone.mesh.visible = false;
             }
         });
 
-        // Update Head (Pin to nose 0, or avg of ears/eyes)
-        if (this.joints[0] && this.joints[0].visible) {
-            this.head.position.copy(this.joints[0].position);
-            // Face camera
-            this.head.lookAt(camera.position);
-            this.head.visible = true;
+        // Update Head
+        // Use nose (0) and ears (7,8) to determine rotation if possible, or just look at camera
+        const nose = this.joints[0];
+        const leftEar = this.joints[7];
+        const rightEar = this.joints[8];
+
+        if (nose && nose.visible) {
+            this.headGroup.visible = true;
+            this.headGroup.position.copy(nose.position);
+            
+            // Simple rotation logic: Look at camera but keep upright? 
+            // Or try to follow head rotation from ears?
+            // Calculating Head Rotation from Ears + Nose is better
+            if (leftEar.visible && rightEar.visible) {
+                // Vector from Left Ear to Right Ear = Local X
+                const earDir = new THREE.Vector3().subVectors(rightEar.position, leftEar.position).normalize();
+                // Vector from Ears Midpoint to Nose = Local Z (Forward)
+                const earMid = new THREE.Vector3().addVectors(leftEar.position, rightEar.position).multiplyScalar(0.5);
+                const faceDir = new THREE.Vector3().subVectors(nose.position, earMid).normalize();
+                // Up vector
+                const upDir = new THREE.Vector3().crossVectors(earDir, faceDir).normalize();
+                
+                // Construct rotation matrix
+                const m = new THREE.Matrix4();
+                m.makeBasis(earDir, upDir.negate(), faceDir); // Y is usually Up. Here, ears to nose is roughly -Y? No, EarMid->Nose is +Z in face coordinates. 
+                // Let's just use lookAt camera for stability if tracking is jittery, 
+                // but user asked for "detailed". Let's try simple LookAt Camera first for reliability.
+                
+                this.headGroup.lookAt(camera.position); 
+            } else {
+                this.headGroup.lookAt(camera.position);
+            }
+            
         } else {
-            this.head.visible = false;
+            this.headGroup.visible = false;
         }
 
-        // Global Position Logic (Move figure in world based on user distance)
-        // We use normalized landmarks for this as 'z' in world landmarks is relative to hips.
-        // We want absolute world position.
-        // Strategy: 
-        // 1. Calculate approximate distance of user from camera based on shoulder width in screen space.
-        // 2. Map screen x/y to world x/y.
-
+        // --- Full Body Offset (Depth/Movement) ---
         if (normalizedLandmarks) {
             const leftShoulder = normalizedLandmarks[11];
             const rightShoulder = normalizedLandmarks[12];
 
             if (leftShoulder && rightShoulder) {
-                // Calculate 2D shoulder width
+                // Distance estimation
                 const dx = leftShoulder.x - rightShoulder.x;
                 const dy = leftShoulder.y - rightShoulder.y;
                 const width = Math.sqrt(dx*dx + dy*dy);
-
-                // Heuristic: Width of 0.5 (half screen) = 1 meter away? 
-                // As width gets smaller, user is further away.
-                // distance ~= constant / width
+                
+                // Tuned depth factor
                 const estimatedDepth = (0.3 / (width + 0.001)); 
+                const targetZ = Math.max(0.5, Math.min(estimatedDepth * 3, 8)) - 4;
 
-                // Smooth transition (Lerp)
-                const targetZ = Math.max(0.5, Math.min(estimatedDepth * 3, 8)) - 4; // Offset to start near origin
-
-                // X position: Map 0.5 (center) to 0. 
+                // X position
                 const centerX = (leftShoulder.x + rightShoulder.x) / 2;
-                const targetX = -(centerX - 0.5) * 5; // Multiplier for sensitivity
+                const targetX = -(centerX - 0.5) * 5;
 
-                // Apply to root group with smoothing
+                // Smooth interpolation
                 this.root.position.x += (targetX - this.root.position.x) * 0.1;
                 this.root.position.z += (targetZ - this.root.position.z) * 0.1;
-
-                // Adjust height based on distance to keep feet on floor roughly
-                // This is tricky without floor detection, but let's just clamp the lowest point to 0 if possible
-                // For now, simple fixed offset
-                this.root.position.y = 1.0; 
+                
+                // Floor clamping: find lowest joint y and offset root so it touches 0
+                // Simple version: Fixed height
+                this.root.position.y = 1.0;
             }
         }
     }
