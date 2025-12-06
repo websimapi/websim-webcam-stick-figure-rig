@@ -94,6 +94,7 @@ class StickFigure {
         });
 
         this.initGeometry();
+        this.initHandGeometry();
     }
 
     initGeometry() {
@@ -198,7 +199,50 @@ class StickFigure {
         });
     }
 
-    update(worldLandmarks, normalizedLandmarks) {
+    initHandGeometry() {
+        // Create Left and Right Hand Groups
+        this.leftHand = this.createHandGroup();
+        this.rightHand = this.createHandGroup();
+        this.root.add(this.leftHand);
+        this.root.add(this.rightHand);
+    }
+
+    createHandGroup() {
+        const group = new THREE.Group();
+        group.visible = false;
+        group.userData = { joints: [], bones: [] };
+
+        const jointGeo = new THREE.SphereGeometry(0.015, 8, 8);
+        
+        // 21 Joints per hand
+        for (let i = 0; i < 21; i++) {
+            const mesh = new THREE.Mesh(jointGeo, this.jointMaterial);
+            group.add(mesh);
+            group.userData.joints.push(mesh);
+        }
+
+        // Bones connections
+        const connections = [
+            [0, 1], [1, 2], [2, 3], [3, 4],     // Thumb
+            [0, 5], [5, 6], [6, 7], [7, 8],     // Index
+            [0, 9], [9, 10], [10, 11], [11, 12],// Middle
+            [0, 13], [13, 14], [14, 15], [15, 16], // Ring
+            [0, 17], [17, 18], [18, 19], [19, 20]  // Pinky
+        ];
+
+        const boneMat = new THREE.MeshStandardMaterial({ color: 0xcccccc });
+
+        connections.forEach(([start, end]) => {
+            const mesh = new THREE.Mesh(new THREE.CylinderGeometry(0.008, 0.008, 1, 6), boneMat);
+            mesh.geometry.rotateX(Math.PI / 2); // Align to Z
+            group.add(mesh);
+            group.userData.bones.push({ mesh, start, end });
+        });
+
+        return group;
+    }
+
+    update(worldLandmarks, normalizedLandmarks, leftHandLandmarks, rightHandLandmarks) {
         const scale = 1.0; 
 
         // 1. Update Root Position FIRST to ensure world matrices are valid for lookAt
@@ -232,8 +276,10 @@ class StickFigure {
         }
 
         if(worldLandmarks) {
-            // 2. Update Joints
+            // 2. Update Body Joints
             for (let i = 0; i < worldLandmarks.length; i++) {
+                // Skip hands (17-22) in body rig if we have full hand tracking, 
+                // but we keep them for the wrist attachment logic.
                 const lm = worldLandmarks[i];
                 if (this.joints[i]) {
                     this.joints[i].position.set(-lm.x * scale, -lm.y * scale, -lm.z * scale);
@@ -245,6 +291,10 @@ class StickFigure {
                     else this.joints[i].scale.setScalar(0.04);
                 }
             }
+
+            // Update Hands
+            this.updateHandInstance(this.leftHand, leftHandLandmarks, worldLandmarks, 15, 19, 17, true);
+            this.updateHandInstance(this.rightHand, rightHandLandmarks, worldLandmarks, 16, 20, 18, false);
         }
 
         // 3. Update Bones
@@ -295,6 +345,115 @@ class StickFigure {
             this.headGroup.visible = false;
         }
     }
+
+    updateHandInstance(handGroup, handLandmarks, bodyLandmarks, wristIdx, indexIdx, pinkyIdx, isLeft) {
+        if (!handLandmarks || !bodyLandmarks[wristIdx] || bodyLandmarks[wristIdx].visibility < 0.5) {
+            handGroup.visible = false;
+            return;
+        }
+
+        handGroup.visible = true;
+
+        // 1. Position: Attach to Wrist
+        // Note: Body landmarks are already inverted (-x, -y, -z) in update(), so we match that transform here
+        const wristPos = new THREE.Vector3(
+            -bodyLandmarks[wristIdx].x,
+            -bodyLandmarks[wristIdx].y,
+            -bodyLandmarks[wristIdx].z
+        );
+
+        // We need to operate in local space of the stick figure root
+        // Since handGroup is child of root, and we set position relative to root
+        handGroup.position.copy(wristPos);
+
+        // 2. Orientation & Scale Logic
+        // We use the body landmarks (Wrist, IndexKnuckle, PinkyKnuckle) to determine the world rotation
+        // because handLandmarks are normalized and lack absolute world rotation.
+        
+        const indexPos = new THREE.Vector3(
+            -bodyLandmarks[indexIdx].x,
+            -bodyLandmarks[indexIdx].y,
+            -bodyLandmarks[indexIdx].z
+        );
+        
+        const pinkyPos = new THREE.Vector3(
+            -bodyLandmarks[pinkyIdx].x,
+            -bodyLandmarks[pinkyIdx].y,
+            -bodyLandmarks[pinkyIdx].z
+        );
+
+        // Calculate Scale: Match 3D distance of Wrist->Index
+        const worldScale = wristPos.distanceTo(indexPos);
+        // Distance in normalized hand landmarks (Wrist=0 to IndexMCP=5)
+        const lmWrist = handLandmarks[0];
+        const lmIndex = handLandmarks[5];
+        const lmPinky = handLandmarks[17];
+
+        const dHand = Math.sqrt(
+            Math.pow(lmIndex.x - lmWrist.x, 2) +
+            Math.pow(lmIndex.y - lmWrist.y, 2) +
+            Math.pow(lmIndex.z - lmWrist.z, 2)
+        );
+        
+        const scale = (worldScale / (dHand + 1e-5)) * 1.0; // Multiplier to tune size if needed
+        handGroup.scale.setScalar(scale);
+
+        // Calculate Rotation
+        // Construct Basis from Pose World Landmarks
+        const vPoseFwd = new THREE.Vector3().subVectors(indexPos, wristPos).normalize();
+        const vPoseSide = new THREE.Vector3().subVectors(pinkyPos, wristPos).normalize();
+        const vPoseUp = new THREE.Vector3().crossVectors(vPoseFwd, vPoseSide).normalize();
+        const vPoseSideCorrected = new THREE.Vector3().crossVectors(vPoseUp, vPoseFwd).normalize();
+        const mPose = new THREE.Matrix4().makeBasis(vPoseFwd, vPoseUp, vPoseSideCorrected);
+
+        // Construct Basis from Hand Landmarks (Local)
+        // Hand system: x=horizontal, y=vertical, z=depth. 
+        // We need vectors corresponding to the same physical axes.
+        const vHandFwd = new THREE.Vector3(lmIndex.x - lmWrist.x, lmIndex.y - lmWrist.y, lmIndex.z - lmWrist.z).normalize();
+        const vHandSide = new THREE.Vector3(lmPinky.x - lmWrist.x, lmPinky.y - lmWrist.y, lmPinky.z - lmWrist.z).normalize();
+        const vHandUp = new THREE.Vector3().crossVectors(vHandFwd, vHandSide).normalize();
+        const vHandSideCorrected = new THREE.Vector3().crossVectors(vHandUp, vHandFwd).normalize();
+        const mHand = new THREE.Matrix4().makeBasis(vHandFwd, vHandUp, vHandSideCorrected);
+        
+        // Rotation R = mPose * inverse(mHand)
+        const mRot = mPose.multiply(mHand.invert());
+        handGroup.quaternion.setFromRotationMatrix(mRot);
+        
+        // Apply mirror for one hand if needed? 
+        // MediaPipe coords are usually consistent, but let's see. 
+        // Actually, just mapping the positions locally works because we computed the rotation to align the basis.
+
+        // 3. Update Joint Positions (Relative to Wrist)
+        handGroup.userData.joints.forEach((mesh, i) => {
+            const lm = handLandmarks[i];
+            // Position relative to wrist (index 0)
+            // Note: We don't invert axes here because we built the rotation matrix mHand from these axes directly.
+            // We just place them as is relative to 0.
+            mesh.position.set(
+                (lm.x - lmWrist.x), 
+                (lm.y - lmWrist.y), 
+                (lm.z - lmWrist.z)
+            );
+        });
+
+        // 4. Update Bones
+        handGroup.userData.bones.forEach(bone => {
+            const p1 = handGroup.userData.joints[bone.start].position;
+            const p2 = handGroup.userData.joints[bone.end].position;
+            
+            bone.mesh.position.copy(p1).add(p2).multiplyScalar(0.5);
+            const dist = p1.distanceTo(p2);
+            bone.mesh.scale.set(1, 1, dist);
+            bone.mesh.lookAt(p2); // lookAt works in local space if parent is transformed? No.
+            // Mesh lookAt operates in world space usually, BUT if we are adding to a group, 
+            // and we want it to look at a local point...
+            // ThreeJS Object3D.lookAt() assumes the target is in WORLD space.
+            // Since p2 is local, we must convert p2 to world for lookAt to work correctly.
+            
+            const worldTarget = p2.clone().applyMatrix4(handGroup.matrixWorld);
+            bone.mesh.lookAt(worldTarget);
+        });
+    }
 }
 
 const stickFigure = new StickFigure(scene);
@@ -304,26 +463,25 @@ log("Configuring Neural Network...");
 
 async function setupMediaPipe() {
     try {
-        if (!window.Pose) {
-            throw new Error("MediaPipe Pose script not loaded.");
+        if (!window.Holistic) {
+            throw new Error("MediaPipe Holistic script not loaded.");
         }
 
-        const pose = new window.Pose({
+        const holistic = new window.Holistic({
             locateFile: (file) => {
-                // IMPORTANT: Use CDN to avoid local file 404s
-                return `https://cdn.jsdelivr.net/npm/@mediapipe/pose/${file}`;
+                return `https://cdn.jsdelivr.net/npm/@mediapipe/holistic/${file}`;
             }
         });
 
-        pose.setOptions({
-            modelComplexity: 1, // 0=Lite, 1=Full, 2=Heavy. 1 is good balance.
+        holistic.setOptions({
+            modelComplexity: 1, 
             smoothLandmarks: true,
             enableSegmentation: false,
             minDetectionConfidence: 0.5,
             minTrackingConfidence: 0.5
         });
 
-        pose.onResults(onResults);
+        holistic.onResults(onResults);
 
         // Setup Camera
         log("Accessing Camera...");
@@ -331,7 +489,7 @@ async function setupMediaPipe() {
 
         const cameraUtils = new window.Camera(videoElement, {
             onFrame: async () => {
-                await pose.send({image: videoElement});
+                await holistic.send({image: videoElement});
             },
             width: 640,
             height: 480
@@ -339,7 +497,7 @@ async function setupMediaPipe() {
 
         log("Starting Camera Stream...");
         await cameraUtils.start();
-        log("Tracking Active!", false); // Success!
+        log("Tracking Active! (Hands + Body)", false); // Success!
 
         // Hide loader after a moment
         setTimeout(() => {
@@ -357,12 +515,13 @@ async function setupMediaPipe() {
 function onResults(results) {
     if (!results.poseLandmarks) return;
 
-    // Draw debug view (optional)
-    // const canvasCtx = document.querySelector('.output_canvas').getContext('2d');
-    // ... drawing code if needed ...
-
     // Update 3D Model
-    stickFigure.update(results.poseWorldLandmarks, results.poseLandmarks);
+    stickFigure.update(
+        results.poseWorldLandmarks, 
+        results.poseLandmarks,
+        results.leftHandLandmarks,
+        results.rightHandLandmarks
+    );
 }
 
 // --- Window Resize Handling ---
